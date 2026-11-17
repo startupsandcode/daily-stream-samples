@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Run It Twice | Startups &amp; Code</title>
+<style>
+:root{color-scheme:dark;--bg:#13110f;--ink:#f4f0e8;--dim:#beb7ac;--panel:#211e1a;--line:#4b4339;--teal:#16b8a6;--orange:#ff6b35}
+*{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--ink);font:17px/1.5 system-ui,sans-serif}
+main{width:min(1100px,94vw);margin:30px auto 48px} h1{font-size:clamp(42px,8vw,76px);letter-spacing:-.07em;line-height:1;margin:4px 0 10px} h2{line-height:1.15;margin:.25em 0 .35em;font-size:24px}
+p{margin:.3em 0 .85em;color:var(--dim)} .tag,.label{color:var(--teal);font:700 13px/1.3 ui-monospace,monospace;letter-spacing:.14em;text-transform:uppercase}
+header{margin-bottom:24px} .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+section{border:1px solid var(--line);background:var(--panel);border-radius:14px;padding:18px;margin-bottom:14px}
+button{font:inherit;font-weight:650;color:var(--ink);background:#302b25;border:1px solid var(--line);border-radius:8px;padding:8px 12px;margin:3px 4px 3px 0;cursor:pointer}
+button:hover{border-color:var(--teal)}button:focus-visible{outline:3px solid var(--teal);outline-offset:2px} button:disabled{opacity:.55;cursor:wait}
+.primary{color:#0d1715;background:var(--teal);border-color:var(--teal)} .fault{border-color:var(--orange)}
+.row{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+code{color:#a6e6da;font-size:.9em} .response{font:700 16px ui-monospace,monospace;white-space:pre-wrap;color:#a6e6da;margin:8px 0 0}
+.response.warn{color:#ffa785} .tablewrap{overflow:auto}
+table{border-collapse:collapse;width:100%;text-align:left;font-size:15px} th,td{padding:9px;border-bottom:1px solid var(--line)}th{color:var(--dim);white-space:nowrap}
+ul{margin:.4em 0 0;padding-left:22px} li{padding:.15em 0} .empty{color:var(--dim)}
+@media(max-width:720px){.grid{grid-template-columns:1fr}main{margin-top:20px}section{padding:14px}}
+</style>
+</head>
+<body><main>
+<header>
+  <div class="tag">Startups &amp; Code / Live demo</div>
+  <h1>Run It Twice.</h1>
+  <p>Same fake signup. Two requests. How many welcome tasks actually got saved?</p>
+</header>
+<div class="grid">
+  <section aria-labelledby="naive">
+    <div class="label">01 / Before</div><h2 id="naive">Blind insert</h2>
+    <p>There is no key to tell the database that this is the same action.</p>
+    <button data-mode="naive" data-signup="signup-42">Send / replay signup-42</button>
+  </section>
+  <section aria-labelledby="keyed">
+    <div class="label">02 / After</div><h2 id="keyed">Stable key + database constraint</h2>
+    <p>The same signup always uses the same action key.</p>
+    <button class="primary" data-mode="protected" data-signup="signup-42">Send / retry signup-42</button>
+    <button data-mode="protected" data-signup="signup-43">Send new signup-43</button>
+    <button class="fault" data-mode="protected" data-signup="signup-42" data-timeout>Send signup-42 + simulate 504</button>
+  </section>
+</div>
+<section aria-labelledby="api">
+  <div class="label">What the caller sees</div><h2 id="api">HTTP response</h2>
+  <div class="response" id="response" role="status">Waiting for a request.</div>
+  <details><summary>Recent attempts</summary><ul id="attempts"></ul></details>
+</section>
+<section aria-labelledby="db">
+  <div class="row"><div><div class="label">What actually persisted</div><h2 id="db">SQLite · <code>welcome_tasks</code></h2></div>
+    <button id="reset">Reset demo</button></div>
+  <p><code>.demo/signup.sqlite3</code> · <span id="count" aria-live="polite">Loading…</span></p>
+  <div class="tablewrap"><table>
+    <thead><tr><th>Task ID</th><th>Mode</th><th>Signup ID</th><th>Task</th><th>Action key</th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table></div>
+</section>
+</main>
+<script>
+const el = id => document.getElementById(id);
+const buttons = [...document.querySelectorAll('button')];
+const api = (url, body) => fetch(url, {
+  method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
+});
+function status(text, warning = false) {
+  el('response').textContent = text;
+  el('response').classList.toggle('warn', warning);
+}
+function showAttempt(text) {
+  const item = document.createElement('li');
+  item.textContent = text;
+  el('attempts').prepend(item);
+  if (el('attempts').children.length > 8) el('attempts').lastElementChild.remove();
+}
+async function render() {
+  const res = await fetch('/api/tasks');
+  if (!res.ok) throw new Error('Could not read the table.');
+  const { rows } = await res.json();
+  el('count').textContent = rows.length + (rows.length === 1 ? ' saved row' : ' saved rows');
+  el('rows').replaceChildren();
+  if (!rows.length) {
+    const cell = el('rows').insertRow().insertCell();
+    cell.colSpan = 5;
+    cell.className = 'empty';
+    cell.textContent = 'No welcome tasks yet.';
+  }
+  for (const row of rows) {
+    const tr = el('rows').insertRow();
+    for (const col of ['task_id','mode','signup_id','task','action_key']) {
+      tr.insertCell().textContent = row[col] ?? '(none)';
+    }
+  }
+}
+async function run(action) {
+  buttons.forEach(b => b.disabled = true);
+  try { await action(); }
+  catch (err) { status(err.message + ' Refresh to recheck the saved rows.', true); }
+  finally { buttons.forEach(b => b.disabled = false); }
+}
+for (const b of document.querySelectorAll('[data-signup]')) {
+  b.onclick = () => run(async () => {
+    const {mode, signup} = b.dataset;
+    const res = await api('/api/signup', {mode, signup_id: signup, timeout: 'timeout' in b.dataset});
+    const data = await res.json();
+    const outcome = res.ok
+      ? (data.created ? 'Created' : 'Reused') + ' task #' + data.task.task_id
+      : data.error;
+    const text = 'HTTP ' + res.status + ' · ' + outcome;
+    status(text, !res.ok);
+    showAttempt(mode + ' / ' + signup + ' / ' + text);
+    await render();
+  });
+}
+el('reset').onclick = () => run(async () => {
+  const res = await api('/api/reset', {confirm: true});
+  if (!res.ok) throw new Error('Demo reset failed.');
+  status('Demo reset. The destination table is empty.');
+  el('attempts').replaceChildren();
+  await render();
+});
+render().catch(err => status(err.message, true));
+</script>
+</body>
+</html>
