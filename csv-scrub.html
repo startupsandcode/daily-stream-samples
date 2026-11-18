@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'none'; base-uri 'none'; form-action 'none'; object-src 'none'">
+<title>CSV Scrub · Offline prototype</title>
+<style>
+:root{color-scheme:dark;--panel:#161e22;--muted:#b3c1c4;--line:#35464b;--cyan:#77e5ce;--text:#f0f7f5}*{box-sizing:border-box}body{margin:0;background:#0f1517;color:var(--text);font:16px/1.55 system-ui,sans-serif}main{max-width:980px;margin:auto;padding:48px 20px 72px}h1{font-size:clamp(2.2rem,7vw,4rem);line-height:1;margin:.5em 0 .28em;letter-spacing:-.05em}h2{font-size:1.18rem;margin:.1em 0 .35em}p{margin:.5em 0;color:var(--muted)}.eyebrow{font-size:.8rem;letter-spacing:.12em;color:var(--cyan);font-weight:700}.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:19px;margin:17px 0}.actions{display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin-top:12px}button,select,input::file-selector-button{font:inherit;color:var(--text);background:#233237;border:1px solid #536a70;border-radius:7px;padding:8px 13px}button,input::file-selector-button{cursor:pointer}button.primary{background:var(--cyan);color:#0e2520;font-weight:700;border-color:var(--cyan)}button:disabled{opacity:.5;cursor:not-allowed}:focus-visible{outline:2px solid var(--cyan);outline-offset:3px}input[type=file]{max-width:100%}input[type=checkbox]{accent-color:var(--cyan)}.scroll{overflow:auto;max-height:430px;border:1px solid var(--line);border-radius:8px;margin-top:10px}table{border-collapse:collapse;width:100%;text-align:left;font-size:.9rem}td,th{padding:9px 12px;border-bottom:1px solid var(--line);vertical-align:top;overflow-wrap:anywhere}thead th{background:#213035;position:sticky;top:0}#preview td{min-width:95px;max-width:230px;white-space:pre-wrap}.changed{color:var(--cyan);background:#1b302d}.warning,#error{color:#ffd297}.small{font-size:.9rem}.agree{display:block;margin-top:13px}.intro{max-width:700px}
+</style></head><body><main>
+<header><div class="eyebrow">OFFLINE PROTOTYPE / V0.1</div><h1>CSV Scrub</h1><p class="intro">Replace personal identifiers without rebuilding your dataset. Rows and columns stay in place. Everything runs in this browser tab, with no upload, analytics, or network calls.</p></header>
+<section class="panel" aria-labelledby="input-title"><h2 id="input-title">1. Start with a CSV</h2><p class="small">UTF-8, comma-separated, with headers. Try the fictional sample first.</p>
+<div class="actions"><button id="demo" type="button" class="primary">Load fictional sample</button><input type="file" id="file" aria-label="Choose local CSV" accept=".csv,text/csv"><button id="reset" type="button">Clear session</button></div><p id="error" role="alert"></p></section>
+<div id="workspace" hidden>
+<section class="panel" aria-labelledby="rules-title"><h2 id="rules-title">2. Review column rules</h2><p id="source"></p><p class="small">Suggestions use column labels and a few common patterns. Free text and combinations such as dates, location, and rare values may still identify someone. A column marked “No known pattern found” has not been cleared for sharing.</p>
+<div class="scroll" tabindex="0" aria-label="Column rules"><table><thead><tr><th scope="col">Column</th><th scope="col">Why review it</th><th scope="col">Action</th></tr></thead><tbody id="rules"></tbody></table></div></section>
+<section class="panel" aria-labelledby="preview-title"><h2 id="preview-title">3. Preview and export</h2><p id="totals" role="status"></p><p class="small">First six output rows. Highlighted cells changed. Replacements are consistent within this file; numeric identifiers may become text. Spreadsheet formula guards can also change values on export.</p>
+<div class="scroll" tabindex="0" aria-label="Output preview"><table id="preview"></table></div>
+<label class="agree"><input id="agree" type="checkbox"> I reviewed the rules. I understand this masks identifiers, but does not guarantee anonymity.</label><div class="actions"><button type="button" id="download" class="primary" disabled>Download scrubbed.csv</button></div></section></div></main>
+<script>const DEMO="customer_id,full_name,email,region,order_total,signup_date,notes\r\nC001,Ada Sample,ada@example.com,NE,49.95,2026-10-01,\"Please call (212) 555-0100\"\r\nC001,Ada Sample,ada@example.com,NE,115.00,2026-10-09,\"Repeat order, asked about shipping\"\r\nC002,Max Example,max@example.com,SW,20.00,2026-11-02,\"Prefers email\"\r\n";
+function engine() {
+ const kinds={keep:"Keep unchanged",scan:"Mask detected cells",name:"Replace names",email:"Replace emails",phone:"Replace phones",id:"Replace identifiers",clear:"Blank entire column"};
+ const known={
+  name:/^(name|full_name|first_name|last_name|given_name|family_name|surname|forename|customer_name|employee_name|patient_name|contact_name|legal_name|middle_name|recipient_name|member_name)$/,
+  email:/(^|_)(email|e_mail)(_|$)/,
+  phone:/(^|_)(phone|telephone|mobile|cell_phone|tel|fax)(_|$)/,
+  clear:/(^|_)(address|street|address1|address2|birthdate|birth_date|dob|ssn|social_security|passport|driver_license|drivers_license|credit_card|card_number|bank_account|tax_id|ip_address|postal_code|postcode|zip|zipcode|password|api_key|secret|access_token|latitude|longitude)(_|$)/,
+  id:/^(customer|user|employee|patient|member|account|person|contact|subscriber|national|client|candidate)_id$|^(username|user_name|handle|external_id)$/
+ };
+ const normalize=s=>s.trim().replace(/([a-z0-9])([A-Z])/g,"$1_$2").toLowerCase().replace(/[^a-z0-9]+/g,"_").replace(/^_|_$/g,"");
+ function parse(input){
+  let s=input.replace(/^\uFEFF/,""), rows=[], row=[], val="", state=0;
+  function field(){row.push(val);val="";state=0;}
+  function end(){field();rows.push(row);row=[];}
+  for(let i=0;i<s.length;i++){
+   const c=s[i];
+   if(state===2){if(c==='"'){if(s[i+1]==='"'){val+='"';i++;}else state=3;}else val+=c;continue;}
+   if(c===','){field();continue;}
+   if(c==='\n'||c==='\r'){if(c==='\r'&&s[i+1]==='\n')i++;end();continue;}
+   if(c==='"'&&state===0){state=2;continue;}
+   if(c==='"'||state===3)throw Error("Unexpected quote or text after a closing quote at row "+(rows.length+1)+".");
+   state=1;val+=c;
+  }
+  if(state===2)throw Error("Unclosed quoted field at row "+(rows.length+1)+".");
+  if(row.length||state!==0)end();
+  if(rows.length<2||!rows[0].some(x=>x.trim()))throw Error("Use a comma-separated CSV with a header and at least one data row.");
+  if(rows[0].some(x=>!x.trim()))throw Error("Blank column headers are not supported. Give every column a name first.");
+  const n=rows[0].length;
+  for(let i=1;i<rows.length;i++)if(rows[i].length!==n)throw Error("Row "+(i+1)+" has "+rows[i].length+" fields; expected "+n+".");
+  return rows;
+ }
+ function detect(s){
+  if(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i.test(s))return true;
+  if(/\b\d{3}-\d{2}-\d{4}\b/.test(s))return true;
+  if(/(?:^|[^0-9])(?:\+?1[ .-]?)?(?:\(\d{3}\)[ .-]?|\d{3}[ .-])\d{3}[ .-]\d{4}(?!\d)/.test(s))return true;
+  return false;
+ }
+ function plan(rows){
+  return rows[0].map((header,i)=>{
+   const h=normalize(header);
+   const rule=Object.keys(known).find(k=>known[k].test(h));
+   let count=0;
+   for(let j=1;j<rows.length;j++)if(detect(rows[j][i]))count++;
+   const review=/\b(notes?|comments?|description|message|birth|age|city|state|gender|sex|race|ethnicity|location|date|organization|company|employer|id)\b/.test(h.replace(/_/g," "));
+   return {header,action:rule||(count?"scan":"keep"),reason:rule?"Column name matched":count?"Pattern matches: "+count:review?"Review: may identify someone":"No known pattern found"};
+  });
+ }
+ function transform(rows,actions){
+  const maps=new Map();let changed=0;
+  const out=[rows[0].slice()];
+  for(let i=1;i<rows.length;i++){
+   out.push(rows[i].map((v,j)=>{
+    if(!v.trim())return v;
+    const type=actions[j];let next=v;
+    if(type==="clear")next="";
+    else if(type==="scan"&&detect(v))next="[REDACTED]";
+    else if(type!=="keep"&&type!=="scan"&&type!=="clear"){
+     if(!maps.has(type))maps.set(type,new Map());
+     const m=maps.get(type),key=v.trim();
+     if(!m.has(key))m.set(key,m.size+1);
+     const n=m.get(key);
+     next=type==="email"?"person"+n+"@example.invalid":type==="phone"?"PHONE_"+n:type==="name"?"Person "+n:"ID_"+n;
+    }
+    if(v!==next)changed++;
+    return next;
+   }));
+  }
+  return {out,changed};
+ }
+ function exportCsv(rows){
+  let guarded=0;
+  const q=(s,i)=>{
+   if(/^[\u0000-\u0020]*[=+\-@\t\r\n＝＋－＠]/u.test(s)&&!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(s.trim())){s="'"+s;guarded++;}
+   return /[",\r\n]/.test(s)?'"'+s.replaceAll('"','""')+'"':s;
+  };
+  const csv=rows.map(row=>row.map(q).join(",")).join("\r\n")+"\r\n";
+  return {csv,guarded};
+ }
+ return {parse,plan,transform,exportCsv,kinds};
+}
+
+const $=id=>document.getElementById(id), e=engine();
+let rows=null, actions=[], current=null, readVersion=0, source="";
+function el(tag,value){const node=document.createElement(tag);if(value!==undefined)node.textContent=value;return node;}
+function clearView(){
+  rows=null; actions=[]; current=null; source="";
+  $("workspace").hidden=true;$("rules").replaceChildren();$("preview").replaceChildren();$("agree").checked=false;$("download").disabled=true;$("totals").textContent="";
+}
+function load(text,label){
+  clearView();$("error").textContent="";
+  try{
+    const data=e.parse(text);
+    if(data[0].length>150||data.length>20001)throw Error("This prototype supports up to 150 columns and 20,000 data rows.");
+    rows=data;source=label;
+    const plan=e.plan(rows);
+    actions=plan.map(x=>x.action);
+    for(const [i,p] of plan.entries()){
+      const tr=el("tr"),name=el("th",p.header),reason=el("td",p.reason),td=el("td"),select=el("select");
+      name.scope="row"; select.setAttribute("aria-label","Action for column "+(i+1)+": "+p.header);
+      if(p.reason.startsWith("Review"))reason.className="warning";
+      for(const [key,label] of Object.entries(e.kinds)){const opt=el("option",label);opt.value=key;select.append(opt);}
+      select.value=p.action;
+      select.addEventListener("change",()=>{actions[i]=select.value;$("agree").checked=false;render();});
+      td.append(select);tr.append(name,reason,td);$("rules").append(tr);
+    }
+    $("source").textContent=source+" · "+(rows.length-1).toLocaleString()+" rows · "+rows[0].length+" columns";
+    $("workspace").hidden=false;render();
+  }catch(err){$("error").textContent=err.message||"Could not parse this CSV.";}
+}
+function render(){
+  const transformed=e.transform(rows,actions);
+  current=e.exportCsv(transformed.out);
+  $("totals").textContent=transformed.changed.toLocaleString()+" cells changed out of "+((rows.length-1)*rows[0].length).toLocaleString()+" data cells. "+(current.guarded?current.guarded+" formula-like fields will be prefixed with an apostrophe on export. ":"")+"No rows or columns removed.";
+  const t=$("preview");t.replaceChildren();
+  const head=el("thead"),hr=el("tr");
+  for(const v of transformed.out[0]){const cell=el("th",v);cell.scope="col";hr.append(cell);}head.append(hr);t.append(head);
+  const body=el("tbody");
+  for(let i=1;i<Math.min(transformed.out.length,7);i++){
+    const tr=el("tr");
+    for(let j=0;j<transformed.out[i].length;j++){
+      const v=transformed.out[i][j],cell=el("td",v.length>180?v.slice(0,177)+"…":v);
+      if(v!==rows[i][j])cell.className="changed";
+      tr.append(cell);
+    }
+    body.append(tr);
+  }
+  t.append(body);
+  $("download").disabled=!$("agree").checked;
+}
+$("file").addEventListener("change",async ev=>{
+  const f=ev.target.files[0], my=++readVersion;
+  if(!f)return;clearView();$("error").textContent="";
+  if(f.size>4*1024*1024){$("error").textContent="Pick a CSV smaller than 4 MiB for the prototype.";return;}
+  try{const txt=new TextDecoder("utf-8",{fatal:true}).decode(await f.arrayBuffer());if(my===readVersion)load(txt,f.name);}
+  catch{if(my===readVersion)$("error").textContent="Could not read the file as UTF-8 CSV.";}
+});
+$("demo").addEventListener("click",()=>{readVersion++;$("file").value="";load(DEMO,"Fictional orders");});
+$("reset").addEventListener("click",()=>{readVersion++;$("file").value="";clearView();$("error").textContent="";});
+$("agree").addEventListener("change",()=>{$("download").disabled=!current||!$("agree").checked;});
+$("download").addEventListener("click",()=>{
+  if(!current||!$("agree").checked)return;
+  const url=URL.createObjectURL(new Blob([current.csv],{type:"text/csv;charset=utf-8"}));
+  const a=el("a");a.href=url;a.download="scrubbed.csv";document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),3000);
+});
+</script></body></html>
